@@ -1,0 +1,957 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Admissions Funnel & Lead Source Analysis</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/recharts/2.10.3/Recharts.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/lodash.js/4.17.21/lodash.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f8fafc;overflow-y:auto;height:100vh;}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const {useState,useEffect,useMemo,useCallback}=React;
+const {BarChart,Bar,XAxis,YAxis,CartesianGrid,Tooltip,Legend,ResponsiveContainer,LineChart,Line,PieChart,Pie,Cell,ComposedChart}=Recharts;
+
+const COLORS=["#6366f1","#06b6d4","#10b981","#f59e0b","#ef4444","#8b5cf6","#ec4899","#14b8a6","#f97316","#64748b","#84cc16","#e11d48"];
+
+const TabBtn=({active,onClick,children})=>(
+  <button onClick={onClick} style={{padding:"8px 18px",border:"none",borderBottom:active?"3px solid #6366f1":"3px solid transparent",background:active?"#eef2ff":"transparent",color:active?"#4338ca":"#64748b",fontWeight:active?700:500,cursor:"pointer",fontSize:14,borderRadius:"6px 6px 0 0",transition:"all 0.15s"}}>{children}</button>
+);
+
+const Card=({title,children,subtitle})=>(
+  <div style={{background:"#fff",borderRadius:12,padding:20,boxShadow:"0 1px 3px rgba(0,0,0,0.08)",border:"1px solid #e5e7eb",marginBottom:16}}>
+    {title&&<h3 style={{margin:"0 0 2px",fontSize:16,color:"#1e293b"}}>{title}</h3>}
+    {subtitle&&<p style={{margin:"0 0 12px",fontSize:12,color:"#94a3b8"}}>{subtitle}</p>}
+    {children}
+  </div>
+);
+
+const KPI=({label,value,sub})=>(
+  <div style={{textAlign:"center",padding:"12px 8px"}}>
+    <div style={{fontSize:28,fontWeight:700,color:"#1e293b"}}>{value}</div>
+    <div style={{fontSize:12,color:"#64748b",marginTop:2}}>{label}</div>
+    {sub&&<div style={{fontSize:11,color:"#94a3b8",marginTop:2}}>{sub}</div>}
+  </div>
+);
+
+const CustomTooltip=({active,payload,labelKey})=>{
+  if(!active||!payload?.length)return null;
+  const d=payload[0].payload;
+  const name=d[labelKey]||d.fullSource||d.fullCampaign||d.fullProgram||d.source||d.campaign||d.program||"";
+  return(
+    <div style={{background:"#fff",border:"1px solid #e5e7eb",borderRadius:8,padding:"10px 14px",maxWidth:400,boxShadow:"0 2px 8px rgba(0,0,0,0.1)"}}>
+      <div style={{fontSize:13,fontWeight:600,color:"#1e293b",marginBottom:6,wordBreak:"break-word"}}>{name}</div>
+      {payload.map((p,i)=>(
+        <div key={i} style={{fontSize:12,color:p.color||"#64748b"}}>{p.name}: {typeof p.value==='number'&&p.value<1?`${p.value}%`:p.value?.toLocaleString?.()??p.value}</div>
+      ))}
+    </div>
+  );
+};
+
+const parseDate=d=>{if(!d)return null;const p=new Date(d);return isNaN(p)?null:p;};
+const getYear=d=>{const p=parseDate(d);return p?p.getFullYear():null;};
+const STAGE_ORDER=["Prospect","Inquiry","MQL","SAL","SQL","Applicant","Admitted","Deposited","Enrolled","Started"];
+const stageRank=s=>{if(!s)return-1;const i=STAGE_ORDER.findIndex(st=>s.toLowerCase().includes(st.toLowerCase()));return i>=0?i:-1;};
+
+function Dashboard(){
+  const[data,setData]=useState([]);
+  const[tab,setTab]=useState("funnel");
+  const[loading,setLoading]=useState(true);
+  const[yearFilter,setYearFilter]=useState("All");
+  const[err,setErr]=useState("nofile");
+
+  const handleFile=useCallback((e)=>{
+    const file=e.target.files[0];
+    if(!file)return;
+    setLoading(true);
+    Papa.parse(file,{
+      header:true,dynamicTyping:true,skipEmptyLines:true,
+      complete:(results)=>{setData(results.data);setErr(null);setLoading(false);}
+    });
+  },[]);
+
+  const years=useMemo(()=>{
+    const s=new Set();
+    data.forEach(r=>{const y=getYear(r["Slate Created Date"])||getYear(r["Marketo Created Date"])||getYear(r["IP Created Date"]);if(y&&y>2015&&y<2030)s.add(y);});
+    return["All",...Array.from(s).sort()];
+  },[data]);
+
+  const filtered=useMemo(()=>{
+    if(yearFilter==="All")return data;
+    return data.filter(r=>{const y=getYear(r["Slate Created Date"])||getYear(r["Marketo Created Date"])||getYear(r["IP Created Date"]);return y===Number(yearFilter);});
+  },[data,yearFilter]);
+
+  const funnelData=useMemo(()=>{
+    const total=filtered.length;
+    const funnelCum=[];
+    STAGE_ORDER.forEach((st,i)=>{
+      const reached=filtered.filter(r=>{
+        let mx=-1;
+        [r["Revenue Stage"]||"",r["Stage Name"]||"",r["Applicant Stage"]||""].forEach(s=>{
+          STAGE_ORDER.forEach((st2,j)=>{if(s&&s.toLowerCase().includes(st2.toLowerCase())&&j>mx)mx=j;});
+        });
+        return mx>=i;
+      }).length;
+      if(reached>0)funnelCum.push({stage:st,count:reached,pct:((reached/total)*100).toFixed(1)});
+    });
+    return{funnelCum,total};
+  },[filtered]);
+
+  const sourceData=useMemo(()=>{
+    const src=_.groupBy(filtered,r=>(r["Initial Lead Source"]||"Unknown").trim());
+    return _.orderBy(Object.entries(src).map(([s,rows])=>{
+      const applied=rows.filter(r=>r["Applications Created Date"]).length;
+      return{source:s.length>30?s.slice(0,28)+"…":s,fullSource:s,leads:rows.length,applied,convRate:rows.length>0?((applied/rows.length)*100).toFixed(1):0};
+    }),"leads","desc").slice(0,15);
+  },[filtered]);
+
+  const programData=useMemo(()=>{
+    const prg=_.groupBy(filtered,r=>(r["Program Name"]||r["Degree"]||"Unknown").trim());
+    return _.orderBy(Object.entries(prg).map(([p,rows])=>{
+      const applied=rows.filter(r=>r["Applications Created Date"]).length;
+      return{program:p.length>35?p.slice(0,33)+"…":p,fullProgram:p,leads:rows.length,applied,convRate:rows.length>0?((applied/rows.length)*100).toFixed(1):0};
+    }),"leads","desc").slice(0,15);
+  },[filtered]);
+
+  const yoyData=useMemo(()=>{
+    const by={};
+    data.forEach(r=>{
+      const y=getYear(r["Slate Created Date"])||getYear(r["Marketo Created Date"])||getYear(r["IP Created Date"]);
+      if(y&&y>2015&&y<2030){if(!by[y])by[y]={year:y,leads:0,applied:0};by[y].leads++;if(r["Applications Created Date"])by[y].applied++;}
+    });
+    return _.orderBy(Object.values(by),"year");
+  },[data]);
+
+  const sourceDetailData=useMemo(()=>{
+    const d=_.groupBy(filtered,r=>(r["Initial Lead Source Detail"]||r["Lead Source Detail (A)"]||"Unknown").trim());
+    return _.orderBy(Object.entries(d).map(([k,rows])=>{
+      const applied=rows.filter(r=>r["Applications Created Date"]).length;
+      return{detail:k.length>40?k.slice(0,38)+"…":k,fullDetail:k,leads:rows.length,applied,convRate:rows.length>0?((applied/rows.length)*100).toFixed(1):0};
+    }),"leads","desc").slice(0,20);
+  },[filtered]);
+
+  const campaignData=useMemo(()=>{
+    const c=_.groupBy(filtered.filter(r=>r["Intended Programs GA Campaign"]||r["Person GA Campaign"]),r=>(r["Intended Programs GA Campaign"]||r["Person GA Campaign"]||"").trim());
+    return _.orderBy(Object.entries(c).map(([k,rows])=>{
+      const applied=rows.filter(r=>r["Applications Created Date"]).length;
+      return{campaign:k.length>40?k.slice(0,38)+"…":k,fullCampaign:k,leads:rows.length,applied,convRate:rows.length>0?((applied/rows.length)*100).toFixed(1):0};
+    }),"leads","desc").slice(0,15);
+  },[filtered]);
+
+  const timingData=useMemo(()=>{
+    const t=_.groupBy(filtered,r=>(r["Person Timing"]||"Unknown").trim());
+    return Object.entries(t).map(([k,rows])=>{
+      const applied=rows.filter(r=>r["Applications Created Date"]).length;
+      return{timing:k,leads:rows.length,applied,convRate:rows.length>0?((applied/rows.length)*100).toFixed(1):0};
+    }).filter(t=>t.timing!=="Unknown");
+  },[filtered]);
+
+  if(err==="nofile"||(!data.length&&!loading))return(
+    <div style={{fontFamily:"-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif",background:"#f8fafc",minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center"}}>
+      <div style={{background:"#fff",borderRadius:16,padding:32,maxWidth:500,boxShadow:"0 4px 12px rgba(0,0,0,0.08)",textAlign:"center"}}>
+        <div style={{fontSize:48,marginBottom:16}}>📊</div>
+        <h2 style={{margin:"0 0 8px",color:"#1e293b"}}>Admissions Dashboard</h2>
+        <p style={{color:"#64748b",fontSize:14,marginBottom:20}}>Upload your CSV export to load the dashboard.</p>
+        <label style={{display:"inline-block",padding:"12px 24px",background:"#6366f1",color:"white",borderRadius:10,cursor:"pointer",fontWeight:600,fontSize:15}}>
+          Choose CSV File
+          <input type="file" accept=".csv" onChange={handleFile} style={{display:"none"}}/>
+        </label>
+      </div>
+    </div>
+  );
+
+  if(loading)return <div style={{padding:40,textAlign:"center",color:"#64748b"}}>Loading data...</div>;
+
+  const totalLeads=filtered.length;
+  const totalApplied=filtered.filter(r=>r["Applications Created Date"]).length;
+  const uniquePrograms=new Set(filtered.map(r=>r["Program Name"]).filter(Boolean)).size;
+  const uniqueSources=new Set(filtered.map(r=>r["Initial Lead Source"]).filter(Boolean)).size;
+
+  return(
+    <div style={{fontFamily:"-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif",background:"#f8fafc",minHeight:"100vh",padding:20,overflowY:"auto"}}>
+      <div style={{maxWidth:1100,margin:"0 auto"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:4}}>
+          <h1 style={{fontSize:22,color:"#1e293b",margin:0}}>Admissions Funnel & Lead Source Analysis</h1>
+          <label style={{fontSize:12,color:"#6366f1",background:"none",border:"1px solid #c7d2fe",borderRadius:6,padding:"4px 10px",cursor:"pointer"}}>
+            ↻ Reload CSV
+            <input type="file" accept=".csv" onChange={handleFile} style={{display:"none"}}/>
+          </label>
+        </div>
+        <p style={{color:"#94a3b8",fontSize:13,marginBottom:16}}>{data.length.toLocaleString()} records loaded</p>
+
+        <div style={{display:"flex",gap:8,marginBottom:16,alignItems:"center",flexWrap:"wrap"}}>
+          <label style={{fontSize:13,color:"#64748b",fontWeight:600}}>Year:</label>
+          <select value={yearFilter} onChange={e=>setYearFilter(e.target.value)} style={{padding:"6px 12px",borderRadius:6,border:"1px solid #d1d5db",fontSize:13,background:"#fff"}}>
+            {years.map(y=><option key={y} value={y}>{y}</option>)}
+          </select>
+          <span style={{fontSize:12,color:"#94a3b8",marginLeft:8}}>{totalLeads.toLocaleString()} leads shown</span>
+        </div>
+
+        <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:12,marginBottom:20}}>
+          <Card><KPI label="Total Leads" value={totalLeads.toLocaleString()}/></Card>
+          <Card><KPI label="Applications" value={totalApplied.toLocaleString()} sub={`${((totalApplied/totalLeads)*100).toFixed(1)}% conv.`}/></Card>
+          <Card><KPI label="Programs" value={uniquePrograms}/></Card>
+          <Card><KPI label="Lead Sources" value={uniqueSources}/></Card>
+        </div>
+
+        <div style={{display:"flex",gap:4,borderBottom:"1px solid #e5e7eb",marginBottom:20,flexWrap:"wrap"}}>
+          {[["funnel","Funnel"],["sources","Lead Sources"],["campaigns","Campaigns"],["programs","Programs"],["yoy","YoY Trends"],["monthly","Monthly"],["tta","Time to App"],["linkedin","LinkedIn"],["timing","Timing"]].map(([k,l])=>(
+            <TabBtn key={k} active={tab===k} onClick={()=>setTab(k)}>{l}</TabBtn>
+          ))}
+        </div>
+
+        {tab==="funnel"&&(
+          <div>
+            <Card title="Conversion Funnel" subtitle="Cumulative count of leads reaching each stage or beyond">
+              {funnelData.funnelCum.length>0?(
+                <ResponsiveContainer width="100%" height={350}>
+                  <BarChart data={funnelData.funnelCum} margin={{left:10,right:30,bottom:5}}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9"/>
+                    <XAxis dataKey="stage" tick={{fontSize:12}}/>
+                    <YAxis tick={{fontSize:12}}/>
+                    <Tooltip formatter={(v,n,p)=>[`${v.toLocaleString()} (${p.payload.pct}%)`,"Reached Stage"]}/>
+                    <Bar dataKey="count" fill="#6366f1" radius={[6,6,0,0]}/>
+                  </BarChart>
+                </ResponsiveContainer>
+              ):<p style={{color:"#94a3b8",fontSize:13}}>No funnel stage data detected.</p>}
+            </Card>
+            <Card title="Stage Distribution" subtitle="Where leads currently sit">
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16}}>
+                <div>
+                  <h4 style={{fontSize:13,color:"#64748b",marginBottom:8}}>Revenue Stage</h4>
+                  {Object.entries(_.countBy(filtered,r=>(r["Revenue Stage"]||"Unknown").trim())).sort((a,b)=>b[1]-a[1]).slice(0,10).map(([s,c])=>(
+                    <div key={s} style={{display:"flex",justifyContent:"space-between",padding:"4px 0",borderBottom:"1px solid #f1f5f9",fontSize:13}}>
+                      <span style={{color:"#334155"}}>{s}</span>
+                      <span style={{fontWeight:600,color:"#6366f1"}}>{c.toLocaleString()} <span style={{color:"#94a3b8",fontWeight:400}}>({((c/totalLeads)*100).toFixed(1)}%)</span></span>
+                    </div>
+                  ))}
+                </div>
+                <div>
+                  <h4 style={{fontSize:13,color:"#64748b",marginBottom:8}}>Applicant Stage</h4>
+                  {Object.entries(_.countBy(filtered,r=>(r["Applicant Stage"]||"—").trim())).sort((a,b)=>b[1]-a[1]).slice(0,10).map(([s,c])=>(
+                    <div key={s} style={{display:"flex",justifyContent:"space-between",padding:"4px 0",borderBottom:"1px solid #f1f5f9",fontSize:13}}>
+                      <span style={{color:"#334155"}}>{s}</span>
+                      <span style={{fontWeight:600,color:"#06b6d4"}}>{c.toLocaleString()} <span style={{color:"#94a3b8",fontWeight:400}}>({((c/totalLeads)*100).toFixed(1)}%)</span></span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </Card>
+          </div>
+        )}
+
+        {tab==="sources"&&(
+          <div>
+            <Card title="Top Lead Sources by Volume" subtitle="Lead count and applications by initial source">
+              <ResponsiveContainer width="100%" height={400}>
+                <BarChart data={sourceData} layout="vertical" margin={{left:140,right:30}}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9"/>
+                  <XAxis type="number" tick={{fontSize:11}}/>
+                  <YAxis type="category" dataKey="source" tick={{fontSize:11}} width={130}/>
+                  <Tooltip content={<CustomTooltip labelKey="fullSource"/>}/>
+                  <Legend/>
+                  <Bar dataKey="leads" fill="#6366f1" name="Leads" radius={[0,4,4,0]}/>
+                  <Bar dataKey="applied" fill="#10b981" name="Applied" radius={[0,4,4,0]}/>
+                </BarChart>
+              </ResponsiveContainer>
+            </Card>
+            <Card title="Conversion Rate by Source" subtitle="% of leads that applied (min 10 leads)">
+              <ResponsiveContainer width="100%" height={400}>
+                <BarChart data={_.orderBy(sourceData.filter(s=>s.leads>=10),"convRate","desc")} layout="vertical" margin={{left:140,right:30}}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9"/>
+                  <XAxis type="number" tick={{fontSize:11}} unit="%"/>
+                  <YAxis type="category" dataKey="source" tick={{fontSize:11}} width={130}/>
+                  <Tooltip content={<CustomTooltip labelKey="fullSource"/>}/>
+                  <Bar dataKey="convRate" fill="#f59e0b" name="Conv %" radius={[0,4,4,0]}/>
+                </BarChart>
+              </ResponsiveContainer>
+            </Card>
+            <Card title="Lead Source Detail Breakdown" subtitle="Top 20 detailed source categories">
+              <div style={{maxHeight:400,overflow:"auto"}}>
+                <table style={{width:"100%",fontSize:12,borderCollapse:"collapse"}}>
+                  <thead><tr style={{borderBottom:"2px solid #e5e7eb",color:"#64748b"}}>
+                    <th style={{textAlign:"left",padding:"8px 4px"}}>Source Detail</th>
+                    <th style={{textAlign:"right",padding:"8px 4px"}}>Leads</th>
+                    <th style={{textAlign:"right",padding:"8px 4px"}}>Applied</th>
+                    <th style={{textAlign:"right",padding:"8px 4px"}}>Conv %</th>
+                  </tr></thead>
+                  <tbody>{sourceDetailData.map((r,i)=>(
+                    <tr key={i} style={{borderBottom:"1px solid #f1f5f9"}} title={r.fullDetail}>
+                      <td style={{padding:"6px 4px",color:"#334155"}}>{r.detail}</td>
+                      <td style={{textAlign:"right",padding:"6px 4px",fontWeight:600}}>{r.leads.toLocaleString()}</td>
+                      <td style={{textAlign:"right",padding:"6px 4px"}}>{r.applied.toLocaleString()}</td>
+                      <td style={{textAlign:"right",padding:"6px 4px",color:Number(r.convRate)>5?"#10b981":"#64748b",fontWeight:600}}>{r.convRate}%</td>
+                    </tr>
+                  ))}</tbody>
+                </table>
+              </div>
+            </Card>
+          </div>
+        )}
+
+        {tab==="campaigns"&&(
+          <div>
+            <Card title="GA Campaign Performance" subtitle="Leads and applications by Google Analytics campaign">
+              {campaignData.length>0?(
+                <ResponsiveContainer width="100%" height={420}>
+                  <BarChart data={campaignData} layout="vertical" margin={{left:180,right:30}}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9"/>
+                    <XAxis type="number" tick={{fontSize:11}}/>
+                    <YAxis type="category" dataKey="campaign" tick={{fontSize:10}} width={170}/>
+                    <Tooltip content={<CustomTooltip labelKey="fullCampaign"/>}/>
+                    <Legend/>
+                    <Bar dataKey="leads" fill="#8b5cf6" name="Leads" radius={[0,4,4,0]}/>
+                    <Bar dataKey="applied" fill="#06b6d4" name="Applied" radius={[0,4,4,0]}/>
+                  </BarChart>
+                </ResponsiveContainer>
+              ):<p style={{color:"#94a3b8",fontSize:13}}>No GA campaign data available.</p>}
+            </Card>
+            <Card title="Campaign Conversion Rates" subtitle="Top campaigns by application conversion (min 5 leads)">
+              <div style={{maxHeight:350,overflow:"auto"}}>
+                <table style={{width:"100%",fontSize:12,borderCollapse:"collapse"}}>
+                  <thead><tr style={{borderBottom:"2px solid #e5e7eb",color:"#64748b"}}>
+                    <th style={{textAlign:"left",padding:"8px 4px"}}>Campaign</th>
+                    <th style={{textAlign:"right",padding:"8px 4px"}}>Leads</th>
+                    <th style={{textAlign:"right",padding:"8px 4px"}}>Applied</th>
+                    <th style={{textAlign:"right",padding:"8px 4px"}}>Conv %</th>
+                  </tr></thead>
+                  <tbody>{_.orderBy(campaignData.filter(c=>c.leads>=5),"convRate","desc").map((r,i)=>(
+                    <tr key={i} style={{borderBottom:"1px solid #f1f5f9"}} title={r.fullCampaign}>
+                      <td style={{padding:"6px 4px",color:"#334155"}}>{r.campaign}</td>
+                      <td style={{textAlign:"right",padding:"6px 4px",fontWeight:600}}>{r.leads}</td>
+                      <td style={{textAlign:"right",padding:"6px 4px"}}>{r.applied}</td>
+                      <td style={{textAlign:"right",padding:"6px 4px",color:Number(r.convRate)>5?"#10b981":"#64748b",fontWeight:600}}>{r.convRate}%</td>
+                    </tr>
+                  ))}</tbody>
+                </table>
+              </div>
+            </Card>
+          </div>
+        )}
+
+        {tab==="programs"&&(
+          <div>
+            <Card title="Top Programs by Demand" subtitle="Lead volume and applications by program">
+              <ResponsiveContainer width="100%" height={420}>
+                <BarChart data={programData} layout="vertical" margin={{left:180,right:30}}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9"/>
+                  <XAxis type="number" tick={{fontSize:11}}/>
+                  <YAxis type="category" dataKey="program" tick={{fontSize:10}} width={170}/>
+                  <Tooltip content={<CustomTooltip labelKey="fullProgram"/>}/>
+                  <Legend/>
+                  <Bar dataKey="leads" fill="#6366f1" name="Leads" radius={[0,4,4,0]}/>
+                  <Bar dataKey="applied" fill="#10b981" name="Applied" radius={[0,4,4,0]}/>
+                </BarChart>
+              </ResponsiveContainer>
+            </Card>
+            <Card title="Program Conversion Rates" subtitle="Application rate by program (min 10 leads)">
+              <ResponsiveContainer width="100%" height={400}>
+                <BarChart data={_.orderBy(programData.filter(p=>p.leads>=10),"convRate","desc")} layout="vertical" margin={{left:180,right:30}}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9"/>
+                  <XAxis type="number" tick={{fontSize:11}} unit="%"/>
+                  <YAxis type="category" dataKey="program" tick={{fontSize:10}} width={170}/>
+                  <Tooltip content={<CustomTooltip labelKey="fullProgram"/>}/>
+                  <Bar dataKey="convRate" fill="#ec4899" name="Conv %" radius={[0,4,4,0]}/>
+                </BarChart>
+              </ResponsiveContainer>
+            </Card>
+            <Card title="Degree Type Distribution">
+              <ResponsiveContainer width="100%" height={300}>
+                <PieChart>
+                  <Pie data={Object.entries(_.countBy(filtered,r=>(r["Degree"]||"Unknown").trim())).map(([k,v])=>({name:k,value:v})).sort((a,b)=>b.value-a.value).slice(0,8)} cx="50%" cy="50%" outerRadius={100} dataKey="value" label={({name,percent})=>`${name} ${(percent*100).toFixed(0)}%`}>
+                    {Array(8).fill(0).map((_,i)=><Cell key={i} fill={COLORS[i%COLORS.length]}/>)}
+                  </Pie>
+                  <Tooltip/>
+                </PieChart>
+              </ResponsiveContainer>
+            </Card>
+          </div>
+        )}
+
+        {tab==="yoy"&&(
+          <div>
+            <Card title="Year-over-Year Lead Volume" subtitle="Total leads and applications by year">
+              <ResponsiveContainer width="100%" height={300}>
+                <BarChart data={yoyData}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9"/>
+                  <XAxis dataKey="year" tick={{fontSize:12}}/>
+                  <YAxis tick={{fontSize:12}}/>
+                  <Tooltip/>
+                  <Legend/>
+                  <Bar dataKey="leads" fill="#6366f1" name="Leads" radius={[6,6,0,0]}/>
+                  <Bar dataKey="applied" fill="#10b981" name="Applied" radius={[6,6,0,0]}/>
+                </BarChart>
+              </ResponsiveContainer>
+            </Card>
+            <Card title="YoY Conversion Trend" subtitle="Application conversion rate over time">
+              <ResponsiveContainer width="100%" height={280}>
+                <LineChart data={yoyData.map(y=>({...y,convRate:y.leads>0?((y.applied/y.leads)*100).toFixed(1):0}))}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9"/>
+                  <XAxis dataKey="year" tick={{fontSize:12}}/>
+                  <YAxis tick={{fontSize:12}} unit="%"/>
+                  <Tooltip formatter={v=>`${v}%`}/>
+                  <Line type="monotone" dataKey="convRate" stroke="#f59e0b" strokeWidth={3} dot={{r:5}} name="Conv %"/>
+                </LineChart>
+              </ResponsiveContainer>
+            </Card>
+            <Card title="YoY Detail">
+              <table style={{width:"100%",fontSize:13,borderCollapse:"collapse"}}>
+                <thead><tr style={{borderBottom:"2px solid #e5e7eb",color:"#64748b"}}>
+                  <th style={{textAlign:"left",padding:8}}>Year</th>
+                  <th style={{textAlign:"right",padding:8}}>Leads</th>
+                  <th style={{textAlign:"right",padding:8}}>Applied</th>
+                  <th style={{textAlign:"right",padding:8}}>Conv %</th>
+                  <th style={{textAlign:"right",padding:8}}>YoY Δ</th>
+                </tr></thead>
+                <tbody>{yoyData.map((y,i)=>{
+                  const prev=i>0?yoyData[i-1].leads:null;
+                  const delta=prev?(((y.leads-prev)/prev)*100).toFixed(1):"—";
+                  return(
+                    <tr key={y.year} style={{borderBottom:"1px solid #f1f5f9"}}>
+                      <td style={{padding:8,fontWeight:600}}>{y.year}</td>
+                      <td style={{textAlign:"right",padding:8}}>{y.leads.toLocaleString()}</td>
+                      <td style={{textAlign:"right",padding:8}}>{y.applied.toLocaleString()}</td>
+                      <td style={{textAlign:"right",padding:8,fontWeight:600,color:"#6366f1"}}>{y.leads>0?((y.applied/y.leads)*100).toFixed(1):0}%</td>
+                      <td style={{textAlign:"right",padding:8,color:delta==="—"?"#94a3b8":Number(delta)>=0?"#10b981":"#ef4444",fontWeight:600}}>{delta==="—"?"—":`${Number(delta)>=0?"+":""}${delta}%`}</td>
+                    </tr>
+                  );
+                })}</tbody>
+              </table>
+            </Card>
+          </div>
+        )}
+
+        {tab==="monthly"&&(()=>{
+          const byMonth={};
+          filtered.forEach(r=>{
+            const d=parseDate(r["Slate Created Date"])||parseDate(r["Marketo Created Date"])||parseDate(r["IP Created Date"]);
+            if(!d)return;
+            const key=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
+            const src=(r["Initial Lead Source"]||"").trim().toLowerCase();
+            const isPaidSocial=src.includes("paid-social")||src.includes("paid social");
+            const isPaidSearch=src.includes("paid-search")||src.includes("paid search");
+            if(!byMonth[key])byMonth[key]={month:key,leads:0,applied:0,psocLeads:0,psocApplied:0,psrcLeads:0,psrcApplied:0};
+            byMonth[key].leads++;
+            if(r["Applications Created Date"])byMonth[key].applied++;
+            if(isPaidSocial){byMonth[key].psocLeads++;if(r["Applications Created Date"])byMonth[key].psocApplied++;}
+            if(isPaidSearch){byMonth[key].psrcLeads++;if(r["Applications Created Date"])byMonth[key].psrcApplied++;}
+          });
+          const monthArr=_.orderBy(Object.values(byMonth),"month").map((m,i,arr)=>{
+            const conv=m.leads>0?((m.applied/m.leads)*100).toFixed(1):"0.0";
+            const psocConv=m.psocLeads>0?((m.psocApplied/m.psocLeads)*100).toFixed(1):"0.0";
+            const psrcConv=m.psrcLeads>0?((m.psrcApplied/m.psrcLeads)*100).toFixed(1):"0.0";
+            const prev=i>0?arr[i-1]:null;
+            const leadDelta=prev?m.leads-prev.leads:null;
+            const leadDeltaPct=prev&&prev.leads>0?(((m.leads-prev.leads)/prev.leads)*100).toFixed(1):null;
+            const appDelta=prev?m.applied-prev.applied:null;
+            const psocLeadDelta=prev?m.psocLeads-prev.psocLeads:null;
+            const psrcLeadDelta=prev?m.psrcLeads-prev.psrcLeads:null;
+            const psocAppDelta=prev?m.psocApplied-prev.psocApplied:null;
+            const psrcAppDelta=prev?m.psrcApplied-prev.psrcApplied:null;
+            return{...m,convRate:conv,psocConv,psrcConv,leadDelta,leadDeltaPct,appDelta,psocLeadDelta,psrcLeadDelta,psocAppDelta,psrcAppDelta};
+          });
+
+          const deltaCell=(val)=>({textAlign:"right",padding:"6px",fontSize:11,color:val===null?"#94a3b8":val>=0?"#10b981":"#ef4444",fontWeight:600});
+          const fmtDelta=v=>v===null?"—":`${v>=0?"+":""}${v}`;
+
+          return(
+          <div>
+            <Card title="Month-over-Month Lead Volume" subtitle="All leads, paid-social, and paid-search by month">
+              <div style={{maxHeight:500,overflowY:"auto"}}>
+                <table style={{width:"100%",fontSize:12,borderCollapse:"collapse"}}>
+                  <thead>
+                    <tr style={{borderBottom:"1px solid #e5e7eb",color:"#94a3b8",fontSize:10}}>
+                      <th style={{padding:"4px 6px"}}></th>
+                      <th colSpan={3} style={{textAlign:"center",padding:"4px 6px",borderLeft:"2px solid #e5e7eb"}}>All Sources</th>
+                      <th colSpan={2} style={{textAlign:"center",padding:"4px 6px",borderLeft:"2px solid #e5e7eb",color:"#8b5cf6"}}>Paid Social</th>
+                      <th colSpan={2} style={{textAlign:"center",padding:"4px 6px",borderLeft:"2px solid #e5e7eb",color:"#0a66c2"}}>Paid Search</th>
+                    </tr>
+                    <tr style={{borderBottom:"2px solid #e5e7eb",color:"#64748b",position:"sticky",top:0,background:"#fff",zIndex:1}}>
+                      <th style={{textAlign:"left",padding:"6px"}}>Month</th>
+                      <th style={{textAlign:"right",padding:"6px",borderLeft:"2px solid #e5e7eb"}}>Leads</th>
+                      <th style={{textAlign:"right",padding:"6px"}}>MoM Δ</th>
+                      <th style={{textAlign:"right",padding:"6px"}}>MoM %</th>
+                      <th style={{textAlign:"right",padding:"6px",borderLeft:"2px solid #e5e7eb"}}>Leads</th>
+                      <th style={{textAlign:"right",padding:"6px"}}>MoM Δ</th>
+                      <th style={{textAlign:"right",padding:"6px",borderLeft:"2px solid #e5e7eb"}}>Leads</th>
+                      <th style={{textAlign:"right",padding:"6px"}}>MoM Δ</th>
+                    </tr>
+                  </thead>
+                  <tbody>{monthArr.map((m,i)=>(
+                    <tr key={i} style={{borderBottom:"1px solid #f1f5f9"}}>
+                      <td style={{padding:"6px",fontWeight:600,color:"#334155"}}>{m.month}</td>
+                      <td style={{textAlign:"right",padding:"6px",borderLeft:"2px solid #f1f5f9"}}>{m.leads.toLocaleString()}</td>
+                      <td style={deltaCell(m.leadDelta)}>{fmtDelta(m.leadDelta)}</td>
+                      <td style={deltaCell(m.leadDeltaPct===null?null:Number(m.leadDeltaPct))}>{m.leadDeltaPct===null?"—":`${Number(m.leadDeltaPct)>=0?"+":""}${m.leadDeltaPct}%`}</td>
+                      <td style={{textAlign:"right",padding:"6px",borderLeft:"2px solid #f1f5f9",color:"#8b5cf6",fontWeight:600}}>{m.psocLeads}</td>
+                      <td style={deltaCell(m.psocLeadDelta)}>{fmtDelta(m.psocLeadDelta)}</td>
+                      <td style={{textAlign:"right",padding:"6px",borderLeft:"2px solid #f1f5f9",color:"#0a66c2",fontWeight:600}}>{m.psrcLeads}</td>
+                      <td style={deltaCell(m.psrcLeadDelta)}>{fmtDelta(m.psrcLeadDelta)}</td>
+                    </tr>
+                  ))}</tbody>
+                </table>
+              </div>
+            </Card>
+            <Card title="Month-over-Month Applications" subtitle="Application volume by source">
+              <div style={{maxHeight:500,overflowY:"auto"}}>
+                <table style={{width:"100%",fontSize:12,borderCollapse:"collapse"}}>
+                  <thead>
+                    <tr style={{borderBottom:"1px solid #e5e7eb",color:"#94a3b8",fontSize:10}}>
+                      <th style={{padding:"4px 6px"}}></th>
+                      <th colSpan={2} style={{textAlign:"center",padding:"4px 6px",borderLeft:"2px solid #e5e7eb"}}>All Sources</th>
+                      <th colSpan={2} style={{textAlign:"center",padding:"4px 6px",borderLeft:"2px solid #e5e7eb",color:"#8b5cf6"}}>Paid Social</th>
+                      <th colSpan={2} style={{textAlign:"center",padding:"4px 6px",borderLeft:"2px solid #e5e7eb",color:"#0a66c2"}}>Paid Search</th>
+                    </tr>
+                    <tr style={{borderBottom:"2px solid #e5e7eb",color:"#64748b",position:"sticky",top:0,background:"#fff",zIndex:1}}>
+                      <th style={{textAlign:"left",padding:"6px"}}>Month</th>
+                      <th style={{textAlign:"right",padding:"6px",borderLeft:"2px solid #e5e7eb"}}>Applied</th>
+                      <th style={{textAlign:"right",padding:"6px"}}>MoM Δ</th>
+                      <th style={{textAlign:"right",padding:"6px",borderLeft:"2px solid #e5e7eb"}}>Applied</th>
+                      <th style={{textAlign:"right",padding:"6px"}}>MoM Δ</th>
+                      <th style={{textAlign:"right",padding:"6px",borderLeft:"2px solid #e5e7eb"}}>Applied</th>
+                      <th style={{textAlign:"right",padding:"6px"}}>MoM Δ</th>
+                    </tr>
+                  </thead>
+                  <tbody>{monthArr.map((m,i)=>(
+                    <tr key={i} style={{borderBottom:"1px solid #f1f5f9"}}>
+                      <td style={{padding:"6px",fontWeight:600,color:"#334155"}}>{m.month}</td>
+                      <td style={{textAlign:"right",padding:"6px",borderLeft:"2px solid #f1f5f9"}}>{m.applied.toLocaleString()}</td>
+                      <td style={deltaCell(m.appDelta)}>{fmtDelta(m.appDelta)}</td>
+                      <td style={{textAlign:"right",padding:"6px",borderLeft:"2px solid #f1f5f9",color:"#8b5cf6",fontWeight:600}}>{m.psocApplied}</td>
+                      <td style={deltaCell(m.psocAppDelta)}>{fmtDelta(m.psocAppDelta)}</td>
+                      <td style={{textAlign:"right",padding:"6px",borderLeft:"2px solid #f1f5f9",color:"#0a66c2",fontWeight:600}}>{m.psrcApplied}</td>
+                      <td style={deltaCell(m.psrcAppDelta)}>{fmtDelta(m.psrcAppDelta)}</td>
+                    </tr>
+                  ))}</tbody>
+                </table>
+              </div>
+            </Card>
+            <Card title="Month-over-Month Conversion Rate" subtitle="% of leads that applied, by source">
+              <div style={{maxHeight:500,overflowY:"auto"}}>
+                <table style={{width:"100%",fontSize:12,borderCollapse:"collapse"}}>
+                  <thead>
+                    <tr style={{borderBottom:"1px solid #e5e7eb",color:"#94a3b8",fontSize:10}}>
+                      <th style={{padding:"4px 6px"}}></th>
+                      <th colSpan={3} style={{textAlign:"center",padding:"4px 6px",borderLeft:"2px solid #e5e7eb"}}>All Sources</th>
+                      <th colSpan={3} style={{textAlign:"center",padding:"4px 6px",borderLeft:"2px solid #e5e7eb",color:"#8b5cf6"}}>Paid Social</th>
+                      <th colSpan={3} style={{textAlign:"center",padding:"4px 6px",borderLeft:"2px solid #e5e7eb",color:"#0a66c2"}}>Paid Search</th>
+                    </tr>
+                    <tr style={{borderBottom:"2px solid #e5e7eb",color:"#64748b",position:"sticky",top:0,background:"#fff",zIndex:1}}>
+                      <th style={{textAlign:"left",padding:"6px"}}>Month</th>
+                      <th style={{textAlign:"right",padding:"6px",borderLeft:"2px solid #e5e7eb"}}>Leads</th>
+                      <th style={{textAlign:"right",padding:"6px"}}>App</th>
+                      <th style={{textAlign:"right",padding:"6px"}}>Conv%</th>
+                      <th style={{textAlign:"right",padding:"6px",borderLeft:"2px solid #e5e7eb"}}>Leads</th>
+                      <th style={{textAlign:"right",padding:"6px"}}>App</th>
+                      <th style={{textAlign:"right",padding:"6px"}}>Conv%</th>
+                      <th style={{textAlign:"right",padding:"6px",borderLeft:"2px solid #e5e7eb"}}>Leads</th>
+                      <th style={{textAlign:"right",padding:"6px"}}>App</th>
+                      <th style={{textAlign:"right",padding:"6px"}}>Conv%</th>
+                    </tr>
+                  </thead>
+                  <tbody>{monthArr.map((m,i)=>{
+                    const convColor=v=>Number(v)>=8?"#10b981":Number(v)>=4?"#f59e0b":"#ef4444";
+                    return(
+                    <tr key={i} style={{borderBottom:"1px solid #f1f5f9"}}>
+                      <td style={{padding:"6px",fontWeight:600,color:"#334155"}}>{m.month}</td>
+                      <td style={{textAlign:"right",padding:"6px",borderLeft:"2px solid #f1f5f9"}}>{m.leads.toLocaleString()}</td>
+                      <td style={{textAlign:"right",padding:"6px"}}>{m.applied}</td>
+                      <td style={{textAlign:"right",padding:"6px",fontWeight:600,color:convColor(m.convRate)}}>{m.convRate}%</td>
+                      <td style={{textAlign:"right",padding:"6px",borderLeft:"2px solid #f1f5f9"}}>{m.psocLeads}</td>
+                      <td style={{textAlign:"right",padding:"6px"}}>{m.psocApplied}</td>
+                      <td style={{textAlign:"right",padding:"6px",fontWeight:600,color:m.psocLeads>0?convColor(m.psocConv):"#94a3b8"}}>{m.psocLeads>0?`${m.psocConv}%`:"—"}</td>
+                      <td style={{textAlign:"right",padding:"6px",borderLeft:"2px solid #f1f5f9"}}>{m.psrcLeads}</td>
+                      <td style={{textAlign:"right",padding:"6px"}}>{m.psrcApplied}</td>
+                      <td style={{textAlign:"right",padding:"6px",fontWeight:600,color:m.psrcLeads>0?convColor(m.psrcConv):"#94a3b8"}}>{m.psrcLeads>0?`${m.psrcConv}%`:"—"}</td>
+                    </tr>);
+                  })}</tbody>
+                </table>
+              </div>
+              <p style={{fontSize:12,color:"#94a3b8",marginTop:8}}>Recent months will show artificially low rates due to lead maturity.</p>
+            </Card>
+          </div>
+          );
+        })()}
+
+        {tab==="tta"&&(()=>{
+          const ttaSlate=filtered.filter(r=>r["Slate Created Date"]&&r["Applications Created Date"]).map(r=>{
+            const created=parseDate(r["Slate Created Date"]),applied=parseDate(r["Applications Created Date"]);
+            if(!created||!applied)return null;
+            const days=Math.round((applied-created)/(1000*60*60*24));
+            const yr=created.getFullYear();
+            return days>=0&&days<1500?{days,yr,source:r["Initial Lead Source"]||"Unknown",program:r["Program Name"]||"Unknown"}:null;
+          }).filter(Boolean);
+
+          const ttaIP=filtered.filter(r=>r["IP Created Date"]&&r["Applications Created Date"]).map(r=>{
+            const created=parseDate(r["IP Created Date"]),applied=parseDate(r["Applications Created Date"]);
+            if(!created||!applied)return null;
+            const days=Math.round((applied-created)/(1000*60*60*24));
+            const yr=created.getFullYear();
+            return days>=0&&days<1500?{days,yr}:null;
+          }).filter(Boolean);
+
+          const median=arr=>{if(!arr.length)return 0;const s=[...arr].sort((a,b)=>a-b);const m=Math.floor(s.length/2);return s.length%2?s[m]:(s[m-1]+s[m])/2;};
+          const pct=(arr,p)=>{if(!arr.length)return 0;const s=[...arr].sort((a,b)=>a-b);const i=Math.ceil(s.length*p/100)-1;return s[Math.max(0,i)];};
+
+          const slateMedian=median(ttaSlate.map(r=>r.days));
+          const ipMedian=median(ttaIP.map(r=>r.days));
+          const slate25=pct(ttaSlate.map(r=>r.days),25);
+          const slate75=pct(ttaSlate.map(r=>r.days),75);
+          const ip25=pct(ttaIP.map(r=>r.days),25);
+          const ip75=pct(ttaIP.map(r=>r.days),75);
+
+          const buckets=[0,7,14,30,60,90,120,180,270,365,730];
+          const bucketLabels=["0-7d","8-14d","15-30d","31-60d","61-90d","91-120d","121-180d","181-270d","271-365d","365d+"];
+          const slateDist=bucketLabels.map(()=>0);
+          const ipDist=bucketLabels.map(()=>0);
+          ttaSlate.forEach(r=>{for(let i=0;i<buckets.length-1;i++){if(r.days>=buckets[i]&&r.days<buckets[i+1]){slateDist[i]++;return;}}slateDist[slateDist.length-1]++;});
+          ttaIP.forEach(r=>{for(let i=0;i<buckets.length-1;i++){if(r.days>=buckets[i]&&r.days<buckets[i+1]){ipDist[i]++;return;}}ipDist[ipDist.length-1]++;});
+          const distData=bucketLabels.map((l,i)=>({bucket:l,slate:slateDist[i],ip:ipDist[i]}));
+
+          const slateByYr=_.groupBy(ttaSlate,"yr");
+          const ipByYr=_.groupBy(ttaIP,"yr");
+          const allYrs=[...new Set([...Object.keys(slateByYr),...Object.keys(ipByYr)])].sort();
+          const yrData=allYrs.filter(y=>Number(y)>2015&&Number(y)<2030).map(y=>({
+            year:Number(y),
+            slateMedian:median((slateByYr[y]||[]).map(r=>r.days)),
+            ipMedian:median((ipByYr[y]||[]).map(r=>r.days)),
+            slateN:(slateByYr[y]||[]).length,
+            ipN:(ipByYr[y]||[]).length,
+            slate25:pct((slateByYr[y]||[]).map(r=>r.days),25),
+            slate75:pct((slateByYr[y]||[]).map(r=>r.days),75),
+          }));
+
+          const curveDays=[7,14,30,60,90,120,180,270,365];
+          const totalByYr={};
+          filtered.forEach(r=>{const y=getYear(r["Slate Created Date"]);if(y&&y>2015&&y<2030){totalByYr[y]=(totalByYr[y]||0)+1;}});
+          const curveData=curveDays.map(d=>{
+            const row={days:d+"d"};
+            allYrs.filter(y=>Number(y)>2015&&Number(y)<2030).forEach(y=>{
+              const applied=(slateByYr[y]||[]).filter(r=>r.days<=d).length;
+              const total=totalByYr[Number(y)]||1;
+              row[y]=((applied/total)*100).toFixed(1);
+            });
+            return row;
+          });
+          const curveYears=allYrs.filter(y=>Number(y)>2015&&Number(y)<2030);
+          const lineColors=["#6366f1","#06b6d4","#10b981","#f59e0b","#ef4444","#8b5cf6","#ec4899","#14b8a6"];
+
+          return(
+          <div>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:12,marginBottom:16}}>
+              <Card><KPI label="Slate → App Median" value={`${Math.round(slateMedian)}d`} sub={`IQR: ${Math.round(slate25)}–${Math.round(slate75)}d`}/></Card>
+              <Card><KPI label="IP → App Median" value={`${Math.round(ipMedian)}d`} sub={`IQR: ${Math.round(ip25)}–${Math.round(ip75)}d`}/></Card>
+              <Card><KPI label="Slate→App Records" value={ttaSlate.length.toLocaleString()}/></Card>
+              <Card><KPI label="IP→App Records" value={ttaIP.length.toLocaleString()}/></Card>
+            </div>
+            <Card title="Time-to-Application Distribution" subtitle="Slate Created → Application vs IP Created → Application">
+              <ResponsiveContainer width="100%" height={320}>
+                <BarChart data={distData}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9"/>
+                  <XAxis dataKey="bucket" tick={{fontSize:11}}/>
+                  <YAxis tick={{fontSize:12}}/>
+                  <Tooltip/>
+                  <Legend/>
+                  <Bar dataKey="slate" fill="#6366f1" name="Slate → App" radius={[4,4,0,0]}/>
+                  <Bar dataKey="ip" fill="#06b6d4" name="IP → App" radius={[4,4,0,0]}/>
+                </BarChart>
+              </ResponsiveContainer>
+            </Card>
+            <Card title="Median Time-to-Application by Year" subtitle="How long it takes leads from each cohort to apply">
+              <ResponsiveContainer width="100%" height={300}>
+                <BarChart data={yrData}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9"/>
+                  <XAxis dataKey="year" tick={{fontSize:12}}/>
+                  <YAxis tick={{fontSize:12}} label={{value:"Days",angle:-90,position:"insideLeft",style:{fontSize:12}}}/>
+                  <Tooltip formatter={v=>`${Math.round(v)} days`}/>
+                  <Legend/>
+                  <Bar dataKey="slateMedian" fill="#6366f1" name="Slate → App Median" radius={[4,4,0,0]}/>
+                  <Bar dataKey="ipMedian" fill="#06b6d4" name="IP → App Median" radius={[4,4,0,0]}/>
+                </BarChart>
+              </ResponsiveContainer>
+              <div style={{marginTop:12}}>
+                <table style={{width:"100%",fontSize:12,borderCollapse:"collapse"}}>
+                  <thead><tr style={{borderBottom:"2px solid #e5e7eb",color:"#64748b"}}>
+                    <th style={{textAlign:"left",padding:"6px 4px"}}>Year</th>
+                    <th style={{textAlign:"right",padding:"6px 4px"}}>Slate Median</th>
+                    <th style={{textAlign:"right",padding:"6px 4px"}}>Slate IQR</th>
+                    <th style={{textAlign:"right",padding:"6px 4px"}}>Slate N</th>
+                    <th style={{textAlign:"right",padding:"6px 4px"}}>IP Median</th>
+                    <th style={{textAlign:"right",padding:"6px 4px"}}>IP N</th>
+                  </tr></thead>
+                  <tbody>{yrData.map(y=>(
+                    <tr key={y.year} style={{borderBottom:"1px solid #f1f5f9"}}>
+                      <td style={{padding:"6px 4px",fontWeight:600}}>{y.year}</td>
+                      <td style={{textAlign:"right",padding:"6px 4px",color:"#6366f1",fontWeight:600}}>{Math.round(y.slateMedian)}d</td>
+                      <td style={{textAlign:"right",padding:"6px 4px",color:"#94a3b8"}}>{Math.round(y.slate25)}–{Math.round(y.slate75)}d</td>
+                      <td style={{textAlign:"right",padding:"6px 4px"}}>{y.slateN.toLocaleString()}</td>
+                      <td style={{textAlign:"right",padding:"6px 4px",color:"#06b6d4",fontWeight:600}}>{Math.round(y.ipMedian)}d</td>
+                      <td style={{textAlign:"right",padding:"6px 4px"}}>{y.ipN.toLocaleString()}</td>
+                    </tr>
+                  ))}</tbody>
+                </table>
+              </div>
+            </Card>
+            <Card title="Cumulative Conversion Curve by Cohort Year" subtitle="% of all leads from each year that applied within X days (apples-to-apples comparison)">
+              <ResponsiveContainer width="100%" height={350}>
+                <LineChart data={curveData}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9"/>
+                  <XAxis dataKey="days" tick={{fontSize:12}}/>
+                  <YAxis tick={{fontSize:12}} unit="%" domain={[0,'auto']}/>
+                  <Tooltip formatter={v=>`${v}%`}/>
+                  <Legend/>
+                  {curveYears.map((y,i)=>(
+                    <Line key={y} type="monotone" dataKey={y} stroke={lineColors[i%lineColors.length]} strokeWidth={2} dot={{r:3}} name={y}/>
+                  ))}
+                </LineChart>
+              </ResponsiveContainer>
+              <p style={{fontSize:12,color:"#94a3b8",marginTop:8}}>This chart answers the maturity question — if 2025/2026 lines track below 2023/2024 at the same number of days, conversion is truly lower.</p>
+            </Card>
+          </div>
+          );
+        })()}
+
+        {tab==="linkedin"&&(()=>{
+          const isLI=r=>{
+            const fields=[r["Initial Lead Source"]||"",r["Initial Lead Source Detail"]||"",r["Person Source"]||"",r["Lead Source Detail (A)"]||"",r["Person Initial Lead Source Detail"]||"",r["Intended Programs GA Campaign"]||"",r["Person GA Campaign"]||""];
+            return fields.some(f=>f.toLowerCase().includes("linkedin"));
+          };
+          const liAll=data.filter(isLI);
+          const liFilt=filtered.filter(isLI);
+
+          const byYr={};
+          liAll.forEach(r=>{
+            const y=getYear(r["Slate Created Date"])||getYear(r["Marketo Created Date"])||getYear(r["IP Created Date"]);
+            if(y&&y>2015&&y<2030){
+              if(!byYr[y])byYr[y]={year:y,leads:0,applied:0};
+              byYr[y].leads++;
+              if(r["Applications Created Date"])byYr[y].applied++;
+            }
+          });
+          const yrArr=_.orderBy(Object.values(byYr),"year");
+
+          const byMonth={};
+          liAll.forEach(r=>{
+            const d=parseDate(r["Slate Created Date"])||parseDate(r["Marketo Created Date"])||parseDate(r["IP Created Date"]);
+            if(!d)return;
+            const key=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
+            if(!byMonth[key])byMonth[key]={month:key,leads:0,applied:0};
+            byMonth[key].leads++;
+            if(r["Applications Created Date"])byMonth[key].applied++;
+          });
+          const monthArr=_.orderBy(Object.values(byMonth),"month").map(m=>({...m,convRate:m.leads>0?((m.applied/m.leads)*100).toFixed(1):0}));
+
+          const byDetail={};
+          liFilt.forEach(r=>{
+            const det=(r["Initial Lead Source Detail"]||r["Lead Source Detail (A)"]||r["Person Initial Lead Source Detail"]||"LinkedIn (unspecified)").trim();
+            if(!byDetail[det])byDetail[det]={detail:det,leads:0,applied:0};
+            byDetail[det].leads++;
+            if(r["Applications Created Date"])byDetail[det].applied++;
+          });
+          const detailArr=_.orderBy(Object.values(byDetail).map(d=>({...d,convRate:d.leads>0?((d.applied/d.leads)*100).toFixed(1):0})),"leads","desc");
+
+          const byProg={};
+          liFilt.forEach(r=>{
+            const p=(r["Program Name"]||"Unknown").trim();
+            if(!byProg[p])byProg[p]={program:p,leads:0,applied:0};
+            byProg[p].leads++;
+            if(r["Applications Created Date"])byProg[p].applied++;
+          });
+          const progArr=_.orderBy(Object.values(byProg).map(p=>({...p,shortProg:p.program.length>35?p.program.slice(0,33)+"…":p.program,convRate:p.leads>0?((p.applied/p.leads)*100).toFixed(1):0})),"leads","desc").slice(0,15);
+
+          const byStage=_.countBy(liFilt,r=>(r["Revenue Stage"]||"Unknown").trim());
+          const stageArr=_.orderBy(Object.entries(byStage).map(([s,c])=>({stage:s,count:c})),"count","desc").slice(0,10);
+
+          const ttaLI=liFilt.filter(r=>r["Slate Created Date"]&&r["Applications Created Date"]).map(r=>{
+            const c=parseDate(r["Slate Created Date"]),a=parseDate(r["Applications Created Date"]);
+            if(!c||!a)return null;
+            const days=Math.round((a-c)/(1000*60*60*24));
+            return days>=0&&days<1500?days:null;
+          }).filter(d=>d!==null);
+          const med=arr=>{if(!arr.length)return 0;const s=[...arr].sort((a,b)=>a-b);const m=Math.floor(s.length/2);return s.length%2?s[m]:(s[m-1]+s[m])/2;};
+          const liMedian=med(ttaLI);
+
+          const totalAll=filtered.length;
+          const liPct=totalAll>0?((liFilt.length/totalAll)*100).toFixed(1):0;
+          const liApplied=liFilt.filter(r=>r["Applications Created Date"]).length;
+          const liConv=liFilt.length>0?((liApplied/liFilt.length)*100).toFixed(1):0;
+
+          return(
+          <div>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:12,marginBottom:16}}>
+              <Card><KPI label="LinkedIn Leads" value={liFilt.length.toLocaleString()} sub={`${liPct}% of all leads`}/></Card>
+              <Card><KPI label="Applications" value={liApplied.toLocaleString()} sub={`${liConv}% conv.`}/></Card>
+              <Card><KPI label="Median Time to App" value={`${Math.round(liMedian)}d`} sub={`${ttaLI.length} records`}/></Card>
+              <Card><KPI label="Conv Rate" value={`${liConv}%`} sub="LinkedIn overall"/></Card>
+            </div>
+
+            <Card title="LinkedIn Lead Volume & Applications by Year" subtitle="Year-over-year LinkedIn performance">
+              <ResponsiveContainer width="100%" height={300}>
+                <BarChart data={yrArr}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9"/>
+                  <XAxis dataKey="year" tick={{fontSize:12}}/>
+                  <YAxis tick={{fontSize:12}}/>
+                  <Tooltip/>
+                  <Legend/>
+                  <Bar dataKey="leads" fill="#0a66c2" name="LinkedIn Leads" radius={[4,4,0,0]}/>
+                  <Bar dataKey="applied" fill="#10b981" name="Applied" radius={[4,4,0,0]}/>
+                </BarChart>
+              </ResponsiveContainer>
+              <table style={{width:"100%",fontSize:12,borderCollapse:"collapse",marginTop:12}}>
+                <thead><tr style={{borderBottom:"2px solid #e5e7eb",color:"#64748b"}}>
+                  <th style={{textAlign:"left",padding:"6px 4px"}}>Year</th>
+                  <th style={{textAlign:"right",padding:"6px 4px"}}>Leads</th>
+                  <th style={{textAlign:"right",padding:"6px 4px"}}>Applied</th>
+                  <th style={{textAlign:"right",padding:"6px 4px"}}>Conv %</th>
+                  <th style={{textAlign:"right",padding:"6px 4px"}}>YoY Δ</th>
+                </tr></thead>
+                <tbody>{yrArr.map((y,i)=>{
+                  const prev=i>0?yrArr[i-1].leads:null;
+                  const delta=prev?(((y.leads-prev)/prev)*100).toFixed(1):"—";
+                  return(<tr key={y.year} style={{borderBottom:"1px solid #f1f5f9"}}>
+                    <td style={{padding:"6px 4px",fontWeight:600}}>{y.year}</td>
+                    <td style={{textAlign:"right",padding:"6px 4px"}}>{y.leads.toLocaleString()}</td>
+                    <td style={{textAlign:"right",padding:"6px 4px"}}>{y.applied.toLocaleString()}</td>
+                    <td style={{textAlign:"right",padding:"6px 4px",color:"#0a66c2",fontWeight:600}}>{y.leads>0?((y.applied/y.leads)*100).toFixed(1):0}%</td>
+                    <td style={{textAlign:"right",padding:"6px 4px",color:delta==="—"?"#94a3b8":Number(delta)>=0?"#10b981":"#ef4444",fontWeight:600}}>{delta==="—"?"—":`${Number(delta)>=0?"+":""}${delta}%`}</td>
+                  </tr>);
+                })}</tbody>
+              </table>
+            </Card>
+
+            <Card title="LinkedIn Leads by Month" subtitle="Monthly volume and applications">
+              <ResponsiveContainer width="100%" height={280}>
+                <BarChart data={monthArr}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9"/>
+                  <XAxis dataKey="month" tick={{fontSize:10}} angle={-45} textAnchor="end" height={60}/>
+                  <YAxis tick={{fontSize:12}}/>
+                  <Tooltip/>
+                  <Legend/>
+                  <Bar dataKey="leads" fill="#0a66c2" name="Leads" radius={[4,4,0,0]}/>
+                  <Bar dataKey="applied" fill="#10b981" name="Applied" radius={[4,4,0,0]}/>
+                </BarChart>
+              </ResponsiveContainer>
+            </Card>
+
+            <Card title="LinkedIn Monthly Conversion Rate" subtitle="% of leads that submitted an application each month">
+              <div style={{maxHeight:400,overflowY:"auto"}}>
+                <table style={{width:"100%",fontSize:12,borderCollapse:"collapse"}}>
+                  <thead><tr style={{borderBottom:"2px solid #e5e7eb",color:"#64748b",position:"sticky",top:0,background:"#fff"}}>
+                    <th style={{textAlign:"left",padding:"8px 6px"}}>Month</th>
+                    <th style={{textAlign:"right",padding:"8px 6px"}}>Leads</th>
+                    <th style={{textAlign:"right",padding:"8px 6px"}}>Applied</th>
+                    <th style={{textAlign:"right",padding:"8px 6px"}}>Conv %</th>
+                    <th style={{textAlign:"left",padding:"8px 6px",width:"40%"}}></th>
+                  </tr></thead>
+                  <tbody>{monthArr.map((m,i)=>(
+                    <tr key={i} style={{borderBottom:"1px solid #f1f5f9"}}>
+                      <td style={{padding:"6px",fontWeight:600,color:"#334155"}}>{m.month}</td>
+                      <td style={{textAlign:"right",padding:"6px"}}>{m.leads}</td>
+                      <td style={{textAlign:"right",padding:"6px"}}>{m.applied}</td>
+                      <td style={{textAlign:"right",padding:"6px",fontWeight:600,color:Number(m.convRate)>=8?"#10b981":Number(m.convRate)>=4?"#f59e0b":"#ef4444"}}>{m.convRate}%</td>
+                      <td style={{padding:"6px"}}><div style={{height:14,borderRadius:4,background:`linear-gradient(90deg, #6366f1 ${Math.min(Number(m.convRate)*5,100)}%, #f1f5f9 ${Math.min(Number(m.convRate)*5,100)}%)`,width:"100%"}}/></td>
+                    </tr>
+                  ))}</tbody>
+                </table>
+              </div>
+              <p style={{fontSize:12,color:"#94a3b8",marginTop:8}}>Recent months will show artificially low rates due to lead maturity.</p>
+            </Card>
+
+            <Card title="LinkedIn Source Breakdown" subtitle="Which LinkedIn channels are driving leads">
+              <div style={{maxHeight:350,overflow:"auto"}}>
+                <table style={{width:"100%",fontSize:12,borderCollapse:"collapse"}}>
+                  <thead><tr style={{borderBottom:"2px solid #e5e7eb",color:"#64748b"}}>
+                    <th style={{textAlign:"left",padding:"8px 4px"}}>Source Detail</th>
+                    <th style={{textAlign:"right",padding:"8px 4px"}}>Leads</th>
+                    <th style={{textAlign:"right",padding:"8px 4px"}}>Applied</th>
+                    <th style={{textAlign:"right",padding:"8px 4px"}}>Conv %</th>
+                  </tr></thead>
+                  <tbody>{detailArr.map((r,i)=>(
+                    <tr key={i} style={{borderBottom:"1px solid #f1f5f9"}}>
+                      <td style={{padding:"6px 4px",color:"#334155"}}>{r.detail}</td>
+                      <td style={{textAlign:"right",padding:"6px 4px",fontWeight:600}}>{r.leads.toLocaleString()}</td>
+                      <td style={{textAlign:"right",padding:"6px 4px"}}>{r.applied.toLocaleString()}</td>
+                      <td style={{textAlign:"right",padding:"6px 4px",color:Number(r.convRate)>5?"#10b981":"#64748b",fontWeight:600}}>{r.convRate}%</td>
+                    </tr>
+                  ))}</tbody>
+                </table>
+              </div>
+            </Card>
+
+            <Card title="LinkedIn Leads by Program" subtitle="Which programs attract LinkedIn leads">
+              <ResponsiveContainer width="100%" height={Math.max(250,progArr.length*28)}>
+                <BarChart data={progArr} layout="vertical" margin={{left:180,right:30}}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9"/>
+                  <XAxis type="number" tick={{fontSize:11}}/>
+                  <YAxis type="category" dataKey="shortProg" tick={{fontSize:10}} width={170}/>
+                  <Tooltip content={<CustomTooltip labelKey="program"/>}/>
+                  <Legend/>
+                  <Bar dataKey="leads" fill="#0a66c2" name="Leads" radius={[0,4,4,0]}/>
+                  <Bar dataKey="applied" fill="#10b981" name="Applied" radius={[0,4,4,0]}/>
+                </BarChart>
+              </ResponsiveContainer>
+            </Card>
+
+            <Card title="LinkedIn Revenue Stage Distribution" subtitle="Where LinkedIn leads sit in the funnel">
+              {stageArr.map(({stage,count})=>(
+                <div key={stage} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"6px 0",borderBottom:"1px solid #f1f5f9",fontSize:13}}>
+                  <span style={{color:"#334155"}}>{stage}</span>
+                  <div style={{display:"flex",alignItems:"center",gap:8}}>
+                    <div style={{width:Math.max(4,Math.round((count/liFilt.length)*200)),height:12,background:"#0a66c2",borderRadius:4}}/>
+                    <span style={{fontWeight:600,minWidth:60,textAlign:"right"}}>{count.toLocaleString()} <span style={{color:"#94a3b8",fontWeight:400}}>({((count/liFilt.length)*100).toFixed(1)}%)</span></span>
+                  </div>
+                </div>
+              ))}
+            </Card>
+          </div>
+          );
+        })()}
+
+        {tab==="timing"&&(
+          <div>
+            <Card title="Lead Timing Distribution" subtitle="When leads plan to enroll and conversion rates">
+              {timingData.length>0?(
+                <>
+                  <ResponsiveContainer width="100%" height={300}>
+                    <BarChart data={_.orderBy(timingData,"leads","desc")}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9"/>
+                      <XAxis dataKey="timing" tick={{fontSize:11}}/>
+                      <YAxis tick={{fontSize:12}}/>
+                      <Tooltip/>
+                      <Legend/>
+                      <Bar dataKey="leads" fill="#6366f1" name="Leads" radius={[6,6,0,0]}/>
+                      <Bar dataKey="applied" fill="#10b981" name="Applied" radius={[6,6,0,0]}/>
+                    </BarChart>
+                  </ResponsiveContainer>
+                  <div style={{marginTop:12}}>
+                    {_.orderBy(timingData,"leads","desc").map((t,i)=>(
+                      <div key={i} style={{display:"flex",justifyContent:"space-between",padding:"6px 0",borderBottom:"1px solid #f1f5f9",fontSize:13}}>
+                        <span>{t.timing}</span>
+                        <span><strong>{t.leads}</strong> leads · <strong>{t.applied}</strong> applied · <span style={{color:"#6366f1",fontWeight:600}}>{t.convRate}%</span></span>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              ):<p style={{color:"#94a3b8"}}>No timing data available.</p>}
+            </Card>
+          </div>
+        )}
+
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.render(<Dashboard/>,document.getElementById('root'));
+</script>
+</body>
+</html>
